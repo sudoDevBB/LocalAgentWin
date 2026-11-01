@@ -1,0 +1,4 @@
+Flask>=3.0,<4
+APScheduler>=3.10,<4
+pycaw>=20240210
+comtypes>=1.2

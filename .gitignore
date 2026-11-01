@@ -1,0 +1,16 @@
+# Local runtime data and generated credentials
+/data/
+
+# Python environments and bytecode
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local agent and design tooling state
+/.agents/
+/.codex/
+/.impeccable/
+
+# Editor and OS files
+.DS_Store
+.vscode/

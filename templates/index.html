@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#18232a">
+  <title>Soundroom · Music & room bells</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#room-overview"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4a8 8 0 0 0-8 8v5.2c0 1.7-.6 3.3-1.7 4.5L5 24h22l-1.3-2.3a8.7 8.7 0 0 1-1.7-4.5V12a8 8 0 0 0-8-8Z"/><path d="M12.5 27a3.8 3.8 0 0 0 7 0"/></svg><span>Soundroom</span></a>
+      <span class="topbar-note">Music for your rooms · bells with a sound of their own</span>
+      <div class="output-status" id="output-status"><span class="state-dot"></span><span id="output-label">Windows default output</span></div>
+    </header>
+    <aside class="sidebar" aria-label="Main navigation">
+      <nav class="primary-nav">
+        <a class="nav-link is-current" href="#room-overview" aria-current="page">Rooms & bells</a>
+        <a class="nav-link" href="#music">Music</a>
+        <a class="nav-link" href="#schedule">Schedule</a>
+        <a class="nav-link" href="#rooms">Sound library</a>
+      </nav>
+      <div class="server-state"><span class="state-dot"></span><span>Local server ready</span></div>
+      <form action="/logout" method="post" class="logout-form"><button class="quiet-button" type="submit">Lock this page</button></form>
+    </aside>
+
+    <main class="content">
+      <header class="page-heading">
+        <div>
+          <h1>Rooms and their bells</h1>
+          <p class="subhead">Each room has its own sound. Preview it, then schedule a bell.</p>
+        </div>
+      </header>
+
+      <div id="bell-live" class="bell-live" role="status" hidden></div>
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+
+      <div class="work-grid">
+        <section class="panel room-panel" id="room-overview" aria-labelledby="room-overview-title">
+          <div class="section-head"><div><h2 id="room-overview-title">Room sound assignments</h2><p>A different sound for each room, so the source is clear by listening.</p></div><button type="button" data-open-bell-form>＋ &nbsp; Schedule a bell</button></div>
+          <div id="room-list" class="room-list"></div>
+        </section>
+
+        <section class="panel player-panel" id="music" aria-labelledby="player-title">
+          <div class="section-head"><div><h2 id="player-title">Now playing</h2><p>Paste a YouTube link to start or change the video.</p></div><span id="playback-state" class="status-label">Ready</span></div>
+          <div class="video-frame" id="video-frame"><div id="youtube-player" aria-label="YouTube video player"></div><div class="video-empty" id="video-empty"><span class="play-symbol" aria-hidden="true">▶</span><span>Your selected video will appear here</span></div></div>
+          <form id="youtube-form" class="link-form">
+            <label class="sr-only" for="youtube-url">YouTube video link</label>
+            <input id="youtube-url" type="url" placeholder="Paste a YouTube video link" autocomplete="url" required>
+            <button type="submit">Play video</button>
+          </form>
+          <div class="player-controls">
+            <button id="pause-video" type="button" class="secondary-button" disabled>Pause video</button>
+            <span id="video-title" class="video-title">No video selected</span>
+          </div>
+          <div class="volume-control">
+            <label for="system-volume">Windows output volume</label>
+            <input id="system-volume" type="range" min="0" max="100" value="50" aria-describedby="volume-value">
+            <output id="volume-value" for="system-volume">—</output>
+          </div>
+          <p class="help-text">Changing the link replaces this page’s video. The browser cannot pause YouTube videos in other tabs.</p>
+        </section>
+
+      </div>
+
+      <section class="panel schedule-panel" id="schedule" aria-labelledby="schedule-title">
+        <div class="section-head schedule-heading"><div><h2 id="schedule-title">Bell schedule</h2><p>Each bell uses its room’s assigned sound. Times follow the Windows computer’s local clock.</p></div><div class="schedule-tools"><div class="room-filter" id="room-filter" aria-label="Filter the schedule by room"></div><button type="button" class="secondary-button schedule-add" data-open-bell-form>＋ &nbsp; Schedule a bell</button></div></div>
+        <form id="bell-form" class="bell-form" hidden>
+          <label>Room<select id="bell-room" required></select></label>
+          <label>Date and time<input id="bell-time" type="datetime-local" required></label>
+          <label>Bell length<select id="bell-duration"><option value="5">5 sec</option><option value="10" selected>10 sec</option><option value="20">20 sec</option><option value="30">30 sec</option></select></label>
+          <label class="wide-field">Note <span class="optional">(optional)</span><input id="bell-label" type="text" maxlength="80" placeholder="For example, tea is ready"></label>
+          <div class="form-actions"><button type="submit">Save bell</button><button type="button" id="cancel-bell" class="secondary-button">Cancel</button></div>
+        </form>
+        <div class="bell-table-wrap"><table class="bell-table"><thead><tr><th scope="col">Time</th><th scope="col">Room</th><th scope="col">Room sound</th><th scope="col">Length</th><th scope="col">Note</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="bell-rows"></tbody></table></div>
+        <p class="empty-state" id="bell-empty" hidden>No bells scheduled. Add a room bell to get started.</p>
+      </section>
+
+      <section class="panel rooms-panel" id="rooms" aria-labelledby="rooms-title">
+        <div class="section-head"><div><h2 id="rooms-title">Sound library</h2><p>Each sound can belong to one room. Preview custom WAV tunes before assigning them.</p></div></div>
+        <form id="new-room-form" class="new-room-form"><label class="sr-only" for="new-room-name">New room name</label><input id="new-room-name" maxlength="48" placeholder="Add a room name" required><button type="submit" class="secondary-button">Add room</button></form>
+        <form id="tune-form" class="tune-form"><label for="tune-file">Add a bell tune <span class="optional">WAV audio, up to 20 MB</span></label><input id="tune-file" name="tune" type="file" accept="audio/wav,.wav" required><button type="submit" class="secondary-button">Upload tune</button></form>
+      </section>
+
+      <footer class="page-footer"><p>Soundroom runs on this Windows computer. Keep it on for bells to sound.</p><p>Use this page only on a trusted local network.</p></footer>
+    </main>
+  </div>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script src="https://www.youtube.com/iframe_api" async></script>
+</body>
+</html>

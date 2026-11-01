@@ -2,20 +2,28 @@ from __future__ import annotations
 
 import json
 import array
+import atexit
 import hashlib
 import math
+import os
+import queue
+import re
 import secrets
 import sqlite3
+import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import wave
 try:
     import winsound
 except ImportError:  # lets the interface preview run on non-Windows development machines
     winsound = None
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -29,19 +37,43 @@ TUNES = DATA / "tunes"
 DB = DATA / "soundroom.db"
 CONFIG = DATA / "config.json"
 ALLOWED_TUNE_EXTENSIONS = {"wav"}
+DEFAULT_PIN = "223344"
+CONFIG_VERSION = 2
+CHROME_DEBUG_PORT = 9222
+VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 DATA.mkdir(exist_ok=True)
 TUNES.mkdir(exist_ok=True)
 if not CONFIG.exists():
-    CONFIG.write_text(json.dumps({"pin": f"{secrets.randbelow(1_000_000):06d}", "secret": secrets.token_hex(32)}, indent=2))
+    CONFIG.write_text(json.dumps({"pin": DEFAULT_PIN, "secret": secrets.token_hex(32), "version": CONFIG_VERSION}, indent=2))
 config = json.loads(CONFIG.read_text())
+if config.get("version", 0) < CONFIG_VERSION:
+    config["pin"] = DEFAULT_PIN
+    config["version"] = CONFIG_VERSION
+    config.setdefault("secret", secrets.token_hex(32))
+    CONFIG.write_text(json.dumps(config, indent=2))
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
 app.secret_key = config["secret"]
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
 scheduler = BackgroundScheduler(daemon=True)
 audio_lock = threading.Lock()
+bell_state_lock = threading.Lock()
+player_lock = threading.RLock()
+player_commands = queue.Queue()
+player_ready = threading.Event()
 active_bell = None
+active_bell_stop = None
+player_process = None
+player_playwright = None
+player_context = None
+player_page = None
+player_thread = None
+player_start_error = None
+player_snapshot = {"state": "idle", "video_id": None, "title": "No video selected"}
 
 
 def connect():
@@ -202,56 +234,277 @@ def set_system_volume(percent):
         comtypes.CoUninitialize()
 
 
-def browser_sessions():
-    """Find likely browser music sessions, without changing other system audio."""
+def chrome_profile_path():
+    return str((DATA / "chrome-profile").resolve())
+
+
+def close_normal_chrome_youtube_tabs():
+    """Close YouTube tabs in the user's regular Chrome windows, leaving other tabs alone."""
+    if sys.platform != "win32":
+        return 0
+    from pywinauto import Desktop
+    from pywinauto.keyboard import send_keys
+
+    managed_profile = os.path.normcase(chrome_profile_path())
+    closed = 0
+    for window in Desktop(backend="uia").windows(class_name="Chrome_WidgetWin_1"):
+        try:
+            command = " ".join(__import__("psutil").Process(window.process_id()).cmdline())
+            if managed_profile in os.path.normcase(command):
+                continue
+            for _ in range(50):
+                youtube_tab = next((tab for tab in window.descendants(control_type="TabItem")
+                                    if "youtube" in tab.window_text().lower()), None)
+                if youtube_tab is None:
+                    break
+                youtube_tab.click_input()
+                window.set_focus()
+                send_keys("^w")
+                closed += 1
+                time.sleep(0.15)
+        except Exception:
+            continue
+    return closed
+
+
+def player_worker():
+    """Own Playwright and its browser objects on one thread for their full lifetime."""
+    global player_playwright, player_context, player_page, player_process, player_start_error, player_snapshot
+    if sys.platform != "win32":
+        player_start_error = "Server-side YouTube playback requires Chrome on the Windows server."
+        player_ready.set()
+        return
+    try:
+        from playwright.sync_api import sync_playwright
+        import psutil
+        player_playwright = sync_playwright().start()
+        player_context = player_playwright.chromium.launch_persistent_context(
+            user_data_dir=chrome_profile_path(),
+            headless=False,
+            args=["--autoplay-policy=no-user-gesture-required", "--no-first-run"],
+        )
+        player_page = player_context.pages[0] if player_context.pages else player_context.new_page()
+        profile = os.path.normcase(chrome_profile_path())
+        for _ in range(40):
+            player_process = next((process for process in psutil.process_iter(["name", "cmdline"])
+                                   if process.info["name"] and process.info["name"].lower() == "chrome.exe"
+                                   and profile in os.path.normcase(" ".join(process.info["cmdline"] or []))), None)
+            if player_process:
+                break
+            time.sleep(0.25)
+        player_ready.set()
+        while True:
+            try:
+                command, value, response = player_commands.get(timeout=1)
+            except queue.Empty:
+                command = "status"
+                value = None
+                response = None
+            try:
+                if command == "shutdown":
+                    if player_context:
+                        player_context.close()
+                    if response:
+                        response.put((True, {"ok": True}))
+                    break
+                elif command == "play":
+                    for extra_page in player_context.pages:
+                        if extra_page != player_page and ("youtube.com" in extra_page.url.lower() or "youtu.be" in extra_page.url.lower()):
+                            extra_page.close()
+                    player_page.goto(f"https://www.youtube.com/watch?v={value}", wait_until="domcontentloaded", timeout=45000)
+                    player_page.wait_for_selector("video", timeout=30000)
+                    player_page.locator("video").evaluate("video => video.play()")
+                    player_snapshot = {"state": "playing", "video_id": value, "title": player_page.title()}
+                    result = dict(player_snapshot)
+                elif command == "pause":
+                    player_page.locator("video").evaluate("video => video.pause()", timeout=5000)
+                    player_snapshot = {**player_snapshot, "state": "paused"}
+                    result = {"ok": True}
+                elif command == "resume":
+                    player_page.locator("video").evaluate("video => video.play()", timeout=5000)
+                    player_snapshot = {**player_snapshot, "state": "playing"}
+                    result = {"ok": True}
+                else:
+                    if player_page:
+                        try:
+                            state = player_page.locator("video").evaluate("video => video.paused ? 'paused' : 'playing'", timeout=1500)
+                            match = re.search(r"[?&]v=([A-Za-z0-9_-]{11})", player_page.url)
+                            player_snapshot = {"state": state, "video_id": match.group(1) if match else None, "title": player_page.title()}
+                        except Exception:
+                            pass
+                    result = dict(player_snapshot)
+                if response:
+                    response.put((True, result))
+            except Exception as exc:
+                if response:
+                    response.put((False, exc))
+    except Exception as exc:
+        player_start_error = f"Could not start Google Chrome on the server: {exc}"
+        player_ready.set()
+        if player_playwright:
+            try:
+                player_playwright.stop()
+            except Exception:
+                pass
+            player_playwright = None
+
+
+def shutdown_player():
+    if player_thread and player_thread.is_alive() and player_ready.is_set() and not player_start_error:
+        response = queue.Queue(maxsize=1)
+        player_commands.put(("shutdown", None, response))
+        try:
+            response.get(timeout=5)
+            player_thread.join(timeout=5)
+        except queue.Empty:
+            pass
+    if player_playwright:
+        try:
+            player_playwright.stop()
+        except Exception:
+            pass
+
+
+def player_command(command, value=None, timeout=60):
+    global player_thread, player_start_error
+    if sys.platform != "win32":
+        raise RuntimeError("Server-side YouTube playback requires Chrome on the Windows server.")
+    with player_lock:
+        if not player_thread or not player_thread.is_alive():
+            player_ready.clear()
+            player_start_error = None
+            player_thread = threading.Thread(target=player_worker, name="Soundroom Chrome controller", daemon=True)
+            player_thread.start()
+        if not player_ready.wait(timeout=30):
+            raise RuntimeError("Chrome did not start in time. Check that Google Chrome is installed on the server.")
+        if player_start_error:
+            raise RuntimeError(player_start_error)
+        response = queue.Queue(maxsize=1)
+        player_commands.put((command, value, response))
+    try:
+        succeeded, result = response.get(timeout=timeout)
+    except queue.Empty as exc:
+        raise RuntimeError("Chrome did not respond in time. Check the server display and internet connection.") from exc
+    if not succeeded:
+        if command == "play":
+            raise RuntimeError("Chrome opened YouTube, but playback did not start. Check the server's internet connection or any YouTube sign-in prompt.") from result
+        if command == "pause":
+            return False
+        raise result
+    return result
+
+
+def play_server_video(video_id):
+    if not VIDEO_ID_RE.fullmatch(video_id):
+        raise ValueError("Enter a valid YouTube video link.")
+    closed_tabs = close_normal_chrome_youtube_tabs()
+    result = player_command("play", video_id, timeout=60)
+    result["closed_tabs"] = closed_tabs
+    return result
+
+
+def pause_server_video():
+    if not player_thread or not player_thread.is_alive() or not player_snapshot.get("video_id"):
+        return False
+    return bool(player_command("pause", timeout=8))
+
+
+def server_player_status():
+    if not player_thread or not player_thread.is_alive():
+        return {"state": "idle", "video_id": None, "title": "No video selected"}
+    try:
+        return player_command("status", timeout=3)
+    except Exception:
+        return dict(player_snapshot)
+
+
+def windows_audio_sessions():
+    """Find audio sessions that belong to Soundroom's managed Chrome process tree."""
     from pycaw.pycaw import AudioUtilities
+    managed_pids = set()
+    if player_process:
+        try:
+            import psutil
+            process = psutil.Process(player_process.pid)
+            managed_pids = {process.pid, *(child.pid for child in process.children(recursive=True))}
+        except Exception:
+            managed_pids = set()
     sessions = []
     for audio_session in AudioUtilities.GetAllSessions():
         try:
             process = audio_session.Process
-            if process and process.name().lower() in {"chrome.exe", "msedge.exe", "firefox.exe", "brave.exe"}:
+            if process and process.name().lower() == "chrome.exe" and (not managed_pids or process.pid in managed_pids):
                 sessions.append(audio_session)
         except Exception:
             continue
-    return sessions
+    return sessions if managed_pids else []
 
 
-def duck_and_play(tune, seconds):
-    global active_bell
-    import comtypes
-    comtypes.CoInitialize()
-    with audio_lock:
-        try:
-            sessions = browser_sessions()
+def duck_and_play(tune, seconds, stop_event):
+    global active_bell, active_bell_stop
+    comtypes = None
+    initialized = False
+    saved = []
+    try:
+        import comtypes as comtypes_module
+        comtypes = comtypes_module
+        comtypes.CoInitialize()
+        initialized = True
+        with audio_lock:
+            sessions = windows_audio_sessions()
             saved = [(item, item.SimpleAudioVolume.GetMasterVolume()) for item in sessions]
             for step in range(1, 9):
                 factor = 1 - (step / 8) * 0.72
                 for item, original in saved:
                     item.SimpleAudioVolume.SetMasterVolume(original * factor, None)
-                time.sleep(0.12)
+                if stop_event.wait(0.12):
+                    break
+            if stop_event.is_set():
+                return
             tune_path = TUNES / tune
             if winsound and tune_path.exists() and tune_path.suffix.lower() == ".wav":
-                winsound.PlaySound(str(tune_path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+                winsound.PlaySound(str(tune_path), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_LOOP)
             elif winsound:
                 winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
-            time.sleep(max(2, min(90, int(seconds))))
+            stop_event.wait(max(2, min(90, int(seconds))))
             if winsound:
                 winsound.PlaySound(None, 0)
-        finally:
-            saved_sessions = locals().get("saved", [])
+    finally:
+        if saved:
             for step in range(1, 9):
-                for item, original in saved_sessions:
+                for item, original in saved:
                     try:
                         item.SimpleAudioVolume.SetMasterVolume(original * (0.28 + (step / 8) * 0.72), None)
                     except Exception:
                         pass
                 time.sleep(0.08)
-            active_bell = None
+        if initialized:
             comtypes.CoUninitialize()
+        with bell_state_lock:
+            active_bell = None
+            active_bell_stop = None
+
+
+def start_bell(room_id, room_name, tune, duration, label="", bell_id=None):
+    global active_bell, active_bell_stop
+    with bell_state_lock:
+        if active_bell:
+            return False
+        stop_event = threading.Event()
+        active_bell_stop = stop_event
+        active_bell = {
+            "id": bell_id,
+            "room_id": room_id,
+            "room": room_name,
+            "label": label,
+            "duration": duration,
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    threading.Thread(target=duck_and_play, args=(tune, duration, stop_event), daemon=True).start()
+    return True
 
 
 def fire_bell(bell_id):
-    global active_bell
     with connect() as db:
         row = db.execute("""
             SELECT b.id, b.room_id, b.label, b.fire_at, r.default_tune AS tune,
@@ -261,8 +514,7 @@ def fire_bell(bell_id):
         db.execute("UPDATE bells SET enabled=0 WHERE id=?", (bell_id,))
     if not row:
         return
-    active_bell = {"id": row["id"], "room": row["room_name"], "label": row["label"], "started_at": datetime.now().isoformat(timespec="seconds")}
-    threading.Thread(target=duck_and_play, args=(row["tune"], row["duration"]), daemon=True).start()
+    start_bell(row["room_id"], row["room_name"], row["tune"], row["duration"], row["label"], row["id"])
 
 
 def schedule_bell(row):
@@ -304,9 +556,11 @@ def login():
 @app.post("/login")
 def login_post():
     if request.form.get("pin", "") == config["pin"]:
+        session.clear()
         session["authenticated"] = True
+        session.permanent = request.form.get("remember_device") == "on"
         return redirect(url_for("index"))
-    return render_template("login.html", error="That PIN did not match. Check the Windows server window and try again."), 401
+    return render_template("login.html", error="That PIN did not match. Use the PIN configured in Soundroom settings."), 401
 
 
 @app.post("/logout")
@@ -318,6 +572,17 @@ def logout():
 @app.get("/")
 def index():
     return render_template("index.html")
+
+
+def local_network_address():
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("192.0.2.1", 80))
+        return probe.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        probe.close()
 
 
 @app.get("/api/status")
@@ -338,7 +603,93 @@ def status():
         "bells": [dict(row) for row in bells],
         "tunes": sorted(p.name for p in TUNES.glob("*.wav")),
         "active_bell": active_bell,
+        "player": server_player_status(),
+        "server_url": f"http://{local_network_address()}:8765",
     })
+
+
+@app.post("/api/player/play")
+def player_play():
+    data = request.json or {}
+    video_id = str(data.get("video_id", ""))
+    try:
+        return jsonify(play_server_video(video_id))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 503
+
+
+@app.post("/api/player/pause")
+def player_pause():
+    if not pause_server_video():
+        return jsonify({"error": "There is no server video playing to pause."}), 409
+    return jsonify({"ok": True})
+
+
+@app.post("/api/player/resume")
+def player_resume():
+    try:
+        player_command("resume", timeout=8)
+    except Exception as exc:
+        return jsonify({"error": f"Could not resume the server video: {exc}"}), 409
+    return jsonify({"ok": True})
+
+
+@app.post("/api/bluetooth/settings")
+def bluetooth_settings():
+    if sys.platform != "win32":
+        return jsonify({"error": "Bluetooth settings are available on the Windows server."}), 503
+    try:
+        os.startfile("ms-settings:bluetooth")
+    except OSError as exc:
+        return jsonify({"error": f"Windows could not open Bluetooth settings: {exc}"}), 503
+    return jsonify({"ok": True})
+
+
+@app.put("/api/settings/pin")
+def update_pin():
+    global config
+    new_pin = str((request.json or {}).get("pin", ""))
+    if not re.fullmatch(r"\d{6}", new_pin):
+        return jsonify({"error": "Use exactly six digits for the access PIN."}), 400
+    config["pin"] = new_pin
+    config["secret"] = secrets.token_hex(32)
+    config["version"] = CONFIG_VERSION
+    temporary_config = CONFIG.with_suffix(".tmp")
+    temporary_config.write_text(json.dumps(config, indent=2))
+    temporary_config.replace(CONFIG)
+    app.secret_key = config["secret"]
+    session.clear()
+    return jsonify({"ok": True, "message": "PIN changed. Sign in again with the new PIN."})
+
+
+@app.post("/api/rooms/<int:room_id>/ring")
+def ring_room(room_id):
+    if sys.platform != "win32":
+        return jsonify({"error": "Room bells play through the Windows audio output."}), 503
+    try:
+        duration = int((request.json or {}).get("duration", 5))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Choose a 5 or 10 second bell."}), 400
+    if duration not in {5, 10}:
+        return jsonify({"error": "Choose a 5 or 10 second bell."}), 400
+    with connect() as db:
+        room = db.execute("SELECT id, name, default_tune FROM rooms WHERE id=?", (room_id,)).fetchone()
+    if not room or not room["default_tune"] or not (TUNES / room["default_tune"]).is_file():
+        return jsonify({"error": "Assign a room sound before ringing this room."}), 400
+    if not start_bell(room["id"], room["name"], room["default_tune"], duration):
+        return jsonify({"error": f"{active_bell['room']} bell is already playing. Stop it before ringing another room."}), 409
+    return jsonify({"ok": True, "room": room["name"], "duration": duration})
+
+
+@app.post("/api/bells/stop")
+def stop_bell():
+    with bell_state_lock:
+        if not active_bell_stop:
+            return jsonify({"error": "No room bell is playing."}), 409
+        active_bell_stop.set()
+    return jsonify({"ok": True})
 
 
 @app.put("/api/volume")
@@ -462,10 +813,15 @@ def preview_tune():
 
 
 if __name__ == "__main__":
+    atexit.register(shutdown_player)
+    if sys.stdout is None:
+        startup_log = (DATA / "server.log").open("a", encoding="utf-8", buffering=1)
+        sys.stdout = startup_log
+        sys.stderr = startup_log
     init_db()
     scheduler.start()
     reload_schedules()
-    print("Soundroom is starting at http://127.0.0.1:8765")
+    print(f"Soundroom is starting at http://{local_network_address()}:8765")
     print(f"Local network access PIN: {config['pin']}")
     print("Keep this service on your trusted local network; do not forward its port to the internet.")
     app.run(host="0.0.0.0", port=8765, threaded=True)

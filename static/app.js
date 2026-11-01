@@ -2,13 +2,12 @@
 
 const $ = (selector) => document.querySelector(selector);
 const notice = $("#notice");
-let player = null;
-let playerReady = false;
-let appState = { rooms: [], bells: [], tunes: [], volume: null, active_bell: null };
+let appState = { rooms: [], bells: [], tunes: [], volume: null, active_bell: null, player: { state: "idle" } };
 let roomFilter = "all";
 let volumeTimer;
 let noticeTimer;
 let lastRoomState = "";
+let refreshBusy = false;
 const roomTuneDrafts = new Map();
 
 function tuneLabel(filename) {
@@ -27,7 +26,7 @@ async function api(path, options = {}) {
   const response = await fetch(path, { credentials: "same-origin", ...options });
   if (response.status === 401) {
     window.location.assign("/login");
-    throw new Error("Your local session ended. Enter the PIN again.");
+    throw new Error("Your saved Soundroom access expired. Enter the PIN again.");
   }
   const data = response.status === 204 ? {} : await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || "Soundroom could not complete that action.");
@@ -67,8 +66,7 @@ function renderBells() {
     date.textContent = new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric" }).format(new Date(bell.fire_at));
     timeCell.append(time, date);
     row.append(timeCell);
-    const values = [bell.room, tuneLabel(bell.tune), `${bell.duration} sec`, bell.label || "—"];
-    for (const value of values) {
+    for (const value of [bell.room, tuneLabel(bell.tune), `${bell.duration} sec`, bell.label || "—"]) {
       const cell = document.createElement("td");
       cell.textContent = value;
       row.append(cell);
@@ -80,17 +78,31 @@ function renderBells() {
     remove.textContent = "Cancel";
     remove.setAttribute("aria-label", `Cancel bell for ${bell.room} at ${localDate(bell.fire_at)}`);
     remove.addEventListener("click", async () => {
-      if (!window.confirm(`Cancel the ${localDate(bell.fire_at)} bell for ${bell.room}?`)) return;
       try {
         await api(`/api/bells/${bell.id}`, { method: "DELETE" });
         await refresh();
-        showNotice("Room bell cancelled.");
+        showNotice("Scheduled room bell cancelled.");
       } catch (error) { showNotice(error.message, "error"); }
     });
     action.append(remove);
     row.append(action);
     body.append(row);
   }
+}
+
+async function ringRoom(room, duration) {
+  if (appState.active_bell && appState.active_bell.room_id === room.id) {
+    try {
+      await api("/api/bells/stop", { method: "POST" });
+      showNotice(`${room.name} bell stopped.`);
+    } catch (error) { showNotice(error.message, "error"); }
+  } else {
+    try {
+      await api(`/api/rooms/${room.id}/ring`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ duration }) });
+      showNotice(`${room.name} bell ringing for ${duration} seconds.`);
+    } catch (error) { showNotice(error.message, "error"); }
+  }
+  await refresh();
 }
 
 function renderRooms() {
@@ -107,6 +119,7 @@ function renderRooms() {
   all.className = roomFilter === "all" ? "room-chip is-selected" : "room-chip";
   all.addEventListener("click", () => { roomFilter = "all"; renderRooms(); renderBells(); });
   filter.append(all);
+
   for (const room of appState.rooms) {
     bellRoom.append(createOption(room.name, String(room.id)));
     const chip = document.createElement("button");
@@ -116,40 +129,46 @@ function renderRooms() {
     chip.addEventListener("click", () => { roomFilter = String(room.id); renderRooms(); renderBells(); });
     filter.append(chip);
 
-    const row = document.createElement("div");
-    row.className = "room-setting";
+    const row = document.createElement("article");
+    row.className = "room-console-row";
+    if (appState.active_bell?.room_id === room.id) row.classList.add("is-ringing");
     const identity = document.createElement("div");
-    identity.className = "room-identity";
-    const nameBlock = document.createElement("div");
-    nameBlock.className = "room-name-block";
+    identity.className = "room-console-identity";
     const name = document.createElement("strong");
     name.textContent = room.name;
-    const assignedLabel = document.createElement("span");
-    assignedLabel.className = "assigned-tune";
-    assignedLabel.textContent = `${tuneLabel(room.default_tune)} · ${room.sound_description || "Custom tune"}`;
-    nameBlock.append(name, assignedLabel);
-    const signature = document.createElement("div");
-    signature.className = "sound-signature";
-    signature.setAttribute("role", "img");
-    signature.setAttribute("aria-label", `Sound pattern for ${room.name}`);
-    for (const height of (room.sound_pattern || [24, 24, 24, 24, 24, 24])) {
-      const bar = document.createElement("span");
-      bar.style.height = `${Math.max(12, Math.min(100, Number(height)))}%`;
-      signature.append(bar);
-    }
-    identity.append(nameBlock, signature);
+    const sound = document.createElement("span");
+    sound.className = "assigned-tune";
+    sound.textContent = `${tuneLabel(room.default_tune)} · ${room.sound_description || "Custom room sound"}`;
     const nextBell = [...appState.bells]
       .filter((bell) => bell.room_id === room.id && new Date(bell.fire_at).getTime() > Date.now())
       .sort((a, b) => new Date(a.fire_at) - new Date(b.fire_at))[0];
-    const next = document.createElement("div");
-    next.className = "room-next-bell";
-    const nextLabel = document.createElement("span");
-    nextLabel.textContent = "Next bell";
-    const nextTime = document.createElement("strong");
-    nextTime.textContent = nextBell ? new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(nextBell.fire_at)) : "Not scheduled";
-    next.append(nextLabel, nextTime);
-    const select = document.createElement("select");
-    select.setAttribute("aria-label", `Default bell tune for ${room.name}`);
+    const next = document.createElement("small");
+    next.textContent = nextBell ? `Next · ${new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" }).format(new Date(nextBell.fire_at))}` : "No bell scheduled";
+    identity.append(name, sound, next);
+
+    const controls = document.createElement("div");
+    controls.className = "ring-controls";
+    for (const duration of [5, 10]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ring-button";
+      const ringingHere = appState.active_bell?.room_id === room.id;
+      const stopDuration = [5, 10].includes(appState.active_bell?.duration) ? appState.active_bell.duration : 5;
+      const isStop = ringingHere && duration === stopDuration;
+      button.textContent = isStop ? "Stop bell" : `Ring · ${duration} sec`;
+      button.setAttribute("aria-label", isStop ? `Stop ${room.name} bell` : `Ring ${room.name} bell for ${duration} seconds`);
+      button.disabled = Boolean(appState.active_bell) && !isStop;
+      if (isStop) button.classList.add("stop-button");
+      button.addEventListener("click", () => ringRoom(room, duration));
+      controls.append(button);
+    }
+
+    const settings = document.createElement("details");
+    settings.className = "room-sound-settings";
+    const summary = document.createElement("summary");
+    summary.textContent = "Sound settings";
+    const tuneSelect = document.createElement("select");
+    tuneSelect.setAttribute("aria-label", `Default bell tune for ${room.name}`);
     const assignedElsewhere = new Map(appState.rooms.filter((other) => other.id !== room.id).map((other) => [other.default_tune, other.name]));
     for (const tune of appState.tunes) {
       const option = createOption(tuneLabel(tune), tune);
@@ -157,42 +176,38 @@ function renderRooms() {
         option.disabled = true;
         option.textContent += ` · assigned to ${assignedElsewhere.get(tune)}`;
       }
-      select.append(option);
+      tuneSelect.append(option);
     }
-    select.value = roomTuneDrafts.get(room.id) || room.default_tune;
-    select.addEventListener("change", () => roomTuneDrafts.set(room.id, select.value));
+    tuneSelect.value = roomTuneDrafts.get(room.id) || room.default_tune;
+    tuneSelect.addEventListener("change", () => roomTuneDrafts.set(room.id, tuneSelect.value));
+    const detailActions = document.createElement("div");
+    detailActions.className = "room-sound-actions";
     const preview = document.createElement("button");
     preview.type = "button";
-    preview.textContent = "Preview sound";
     preview.className = "quiet-button";
+    preview.textContent = "Preview";
     preview.addEventListener("click", async () => {
-      const tune = select.value;
       try {
-        await api("/api/tunes/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tune }) });
-        showNotice(`Playing the ${tuneLabel(tune)} sound through the Windows speaker.`);
+        await api("/api/tunes/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tune: tuneSelect.value }) });
+        showNotice(`Previewing ${tuneLabel(tuneSelect.value)} through the Windows output.`);
       } catch (error) { showNotice(error.message, "error"); }
     });
     const save = document.createElement("button");
     save.type = "button";
-    save.textContent = "Save tune";
     save.className = "secondary-button";
+    save.textContent = "Save sound";
     save.addEventListener("click", async () => {
       try {
-        await api(`/api/rooms/${room.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ default_tune: select.value }) });
+        await api(`/api/rooms/${room.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ default_tune: tuneSelect.value }) });
         roomTuneDrafts.delete(room.id);
         await refresh();
-        showNotice(`Default tune saved for ${room.name}.`);
+        showNotice(`Room sound saved for ${room.name}.`);
       } catch (error) { showNotice(error.message, "error"); }
     });
-    const tuneControl = document.createElement("label");
-    tuneControl.className = "room-tune-control";
-    const tuneLabelText = document.createElement("span");
-    tuneLabelText.textContent = "Change sound";
-    tuneControl.append(tuneLabelText, select);
-    const actions = document.createElement("div");
-    actions.className = "room-actions";
-    actions.append(preview, save);
-    row.append(identity, next, tuneControl, actions);
+    detailActions.append(preview, save);
+    settings.append(summary, tuneSelect, detailActions);
+
+    row.append(identity, controls, settings);
     list.append(row);
   }
   if (appState.rooms.some((room) => String(room.id) === previous)) bellRoom.value = previous;
@@ -202,7 +217,7 @@ function renderStatus() {
   renderBells();
   const live = $("#bell-live");
   if (appState.active_bell) {
-    live.textContent = `${appState.active_bell.room} bell is playing. Music will return when it finishes.`;
+    live.textContent = `${appState.active_bell.room} bell is ringing. Press Stop bell to end it now.`;
     live.hidden = false;
   } else {
     live.hidden = true;
@@ -210,17 +225,32 @@ function renderStatus() {
   const slider = $("#system-volume");
   if (appState.volume !== null && document.activeElement !== slider) slider.value = appState.volume;
   $("#volume-value").textContent = appState.volume === null ? "Unavailable" : `${appState.volume}%`;
+  $("#output-label").textContent = appState.output_name || "Windows output unavailable";
+  $("#server-url").textContent = appState.server_url || "Unavailable";
+  $("#server-url-label").textContent = appState.server_url || "Server address unavailable";
+  const player = appState.player || { state: "idle" };
+  const labels = { playing: "Playing on server", paused: "Paused on server", idle: "Ready" };
+  $("#playback-state").textContent = labels[player.state] || "Ready";
+  $("#video-title").textContent = player.video_id ? player.title || `YouTube video ${player.video_id}` : "No video selected";
+  $("#server-player-note").textContent = player.state === "playing" ? "Sound is coming from the Windows server." : player.state === "paused" ? "Video is paused on the Windows server." : "Ready to play through the Windows default output.";
+  $("#pause-video").textContent = player.state === "paused" ? "Resume video" : "Pause video";
+  $("#pause-video").disabled = !player.video_id;
 }
 
 async function refresh() {
-  appState = await api("/api/status");
-  const roomState = JSON.stringify([appState.rooms, appState.bells]);
-  if (roomState !== lastRoomState) {
-    renderRooms();
-    lastRoomState = roomState;
+  if (refreshBusy) return;
+  refreshBusy = true;
+  try {
+    appState = await api("/api/status");
+    const roomState = JSON.stringify([appState.rooms, appState.bells, appState.active_bell]);
+    if (roomState !== lastRoomState) {
+      renderRooms();
+      lastRoomState = roomState;
+    }
+    renderStatus();
+  } finally {
+    refreshBusy = false;
   }
-  renderStatus();
-  $("#output-label").textContent = appState.output_name || "Windows default output";
 }
 
 function parseVideoId(input) {
@@ -236,42 +266,37 @@ function parseVideoId(input) {
   return null;
 }
 
-window.onYouTubeIframeAPIReady = function () {
-  player = new YT.Player("youtube-player", {
-    width: "100%",
-    height: "100%",
-    playerVars: { playsinline: 1, rel: 0 },
-    events: {
-      onReady() { playerReady = true; },
-      onStateChange(event) {
-        const states = { [-1]: "Ready", 0: "Finished", 1: "Playing", 2: "Paused", 3: "Buffering", 5: "Ready" };
-        $("#playback-state").textContent = states[event.data] || "Ready";
-        $("#pause-video").disabled = event.data !== YT.PlayerState.PLAYING;
-      },
-      onError() { showNotice("YouTube could not play this video. Check the link and try another video.", "error"); }
-    }
-  });
-};
-
-$("#youtube-form").addEventListener("submit", (event) => {
+$("#youtube-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const videoId = parseVideoId($("#youtube-url").value.trim());
   if (!videoId || !/^[\w-]{11}$/.test(videoId)) {
     showNotice("Enter a valid YouTube video link.", "error");
     return;
   }
-  if (!playerReady) {
-    showNotice("The YouTube player is still loading. Try again in a moment.");
-    return;
-  }
-  player.loadVideoById(videoId);
-  $("#video-empty").hidden = true;
-  $("#video-title").textContent = `YouTube video · ${videoId}`;
-  $("#pause-video").disabled = false;
+  const button = event.submitter;
+  button.disabled = true;
+  button.textContent = "Opening player…";
+  try {
+    const result = await api("/api/player/play", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ video_id: videoId }) });
+    await refresh();
+    showNotice(result.closed_tabs ? `Closed ${result.closed_tabs} YouTube tab${result.closed_tabs === 1 ? "" : "s"} in regular Chrome. Playing on the server.` : "Playing on the server.");
+  } catch (error) { showNotice(error.message, "error"); }
+  finally { button.disabled = false; button.textContent = "Play on server"; }
 });
 
-$("#pause-video").addEventListener("click", () => {
-  if (playerReady) player.pauseVideo();
+$("#pause-video").addEventListener("click", async () => {
+  try {
+    const action = appState.player?.state === "paused" ? "resume" : "pause";
+    await api(`/api/player/${action}`, { method: "POST" });
+    await refresh();
+  } catch (error) { showNotice(error.message, "error"); }
+});
+
+$("#bluetooth-settings").addEventListener("click", async () => {
+  try {
+    await api("/api/bluetooth/settings", { method: "POST" });
+    showNotice("Windows Bluetooth settings opened on the server. Connect your speaker and set it as the Windows output.");
+  } catch (error) { showNotice(error.message, "error"); }
 });
 
 $("#system-volume").addEventListener("input", (event) => {
@@ -290,8 +315,7 @@ function openBellForm() {
   $("#bell-form").scrollIntoView({ behavior: "smooth", block: "center" });
   const now = new Date();
   now.setMinutes(Math.ceil((now.getMinutes() + 1) / 5) * 5, 0, 0);
-  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-  $("#bell-time").value = local;
+  $("#bell-time").value = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
   $("#bell-room").focus();
 }
 document.querySelectorAll("[data-open-bell-form]").forEach((button) => button.addEventListener("click", openBellForm));
@@ -341,7 +365,22 @@ $("#tune-form").addEventListener("submit", async (event) => {
   } catch (error) { showNotice(error.message, "error"); }
 });
 
+$("#pin-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const pin = $("#new-pin").value;
+  if (!/^\d{6}$/.test(pin)) {
+    showNotice("Use exactly six digits for the access PIN.", "error");
+    return;
+  }
+  try {
+    await api("/api/settings/pin", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pin }) });
+    $("#pin-form").reset();
+    showNotice("PIN changed. Sign in again with the new PIN.");
+    setTimeout(() => window.location.assign("/login"), 1200);
+  } catch (error) { showNotice(error.message, "error"); }
+});
+
 document.addEventListener("DOMContentLoaded", () => {
   refresh().catch((error) => showNotice(error.message, "error"));
-  setInterval(() => refresh().catch(() => {}), 10000);
+  setInterval(() => refresh().catch(() => {}), 1800);
 });

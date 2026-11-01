@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import array
-import atexit
 import hashlib
 import math
 import os
@@ -16,8 +15,6 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 import wave
 try:
     import winsound
@@ -28,6 +25,7 @@ from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+from flask_sock import Sock
 from werkzeug.utils import secure_filename
 
 
@@ -39,7 +37,6 @@ CONFIG = DATA / "config.json"
 ALLOWED_TUNE_EXTENSIONS = {"wav"}
 DEFAULT_PIN = "223344"
 CONFIG_VERSION = 2
-CHROME_DEBUG_PORT = 9222
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 DATA.mkdir(exist_ok=True)
@@ -59,21 +56,23 @@ app.secret_key = config["secret"]
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
+app.config["SOCK_SERVER_OPTIONS"] = {"ping_interval": 25}
+sock = Sock(app)
 scheduler = BackgroundScheduler(daemon=True)
 audio_lock = threading.Lock()
 bell_state_lock = threading.Lock()
 player_lock = threading.RLock()
-player_commands = queue.Queue()
-player_ready = threading.Event()
+extension_lock = threading.Lock()
+extension_pending_lock = threading.Lock()
+extension_outbound = queue.Queue()
+extension_pending = {}
+extension_connected = threading.Event()
+extension_connection_id = None
+extension_ws = None
 active_bell = None
 active_bell_stop = None
 player_process = None
-player_playwright = None
-player_context = None
-player_page = None
-player_thread = None
-player_start_error = None
-player_snapshot = {"state": "idle", "video_id": None, "title": "No video selected"}
+player_snapshot = {"state": "idle", "video_id": None, "title": "No video selected", "available": False}
 
 
 def connect():
@@ -264,233 +263,86 @@ def set_system_volume(percent):
         comtypes.CoUninitialize()
 
 
-def chrome_profile_path():
-    return str((DATA / "chrome-profile").resolve())
+def find_chrome_executable():
+    candidates = [
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
+        Path(os.environ.get("PROGRAMFILES", "")) / "Google/Chrome/Application/chrome.exe",
+        Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Google/Chrome/Application/chrome.exe",
+    ]
+    return next((path for path in candidates if path.is_file()), None)
 
 
-def close_normal_chrome_youtube_tabs():
-    """Close YouTube tabs in the user's regular Chrome windows, leaving other tabs alone."""
+def open_chrome_on_server():
     if sys.platform != "win32":
-        return 0
-    from pywinauto import Desktop
-    from pywinauto.keyboard import send_keys
-
-    managed_profile = os.path.normcase(chrome_profile_path())
-    closed = 0
-    for window in Desktop(backend="uia").windows(class_name="Chrome_WidgetWin_1"):
-        try:
-            command = " ".join(__import__("psutil").Process(window.process_id()).cmdline())
-            if managed_profile in os.path.normcase(command):
-                continue
-            for _ in range(50):
-                youtube_tab = next((tab for tab in window.descendants(control_type="TabItem")
-                                    if "youtube" in tab.window_text().lower()), None)
-                if youtube_tab is None:
-                    break
-                youtube_tab.click_input()
-                window.set_focus()
-                send_keys("^w")
-                closed += 1
-                time.sleep(0.15)
-        except Exception:
-            continue
-    return closed
+        raise RuntimeError("The signed-in Chrome player is available on the Windows server.")
+    executable = find_chrome_executable()
+    if not executable:
+        raise RuntimeError("Install Google Chrome on the Windows server, then open Chrome once to load the Soundroom extension.")
+    subprocess.Popen([str(executable), "https://www.youtube.com"], close_fds=True)
+    return {"ok": True}
 
 
-def player_worker():
-    """Own Playwright and its browser objects on one thread for their full lifetime."""
-    global player_playwright, player_context, player_page, player_process, player_start_error, player_snapshot
+def find_chrome_main_process():
     if sys.platform != "win32":
-        player_start_error = "Server-side YouTube playback requires Chrome on the Windows server."
-        player_ready.set()
-        return
+        return None
     try:
-        from playwright.sync_api import sync_playwright
         import psutil
-        player_playwright = sync_playwright().start()
-        player_context = player_playwright.chromium.launch_persistent_context(
-            user_data_dir=chrome_profile_path(),
-            headless=False,
-            args=["--autoplay-policy=no-user-gesture-required", "--no-first-run"],
-        )
-        player_page = player_context.pages[0] if player_context.pages else player_context.new_page()
-        profile = os.path.normcase(chrome_profile_path())
-        for _ in range(40):
-            player_process = next((process for process in psutil.process_iter(["name", "cmdline"])
-                                   if process.info["name"] and process.info["name"].lower() == "chrome.exe"
-                                   and profile in os.path.normcase(" ".join(process.info["cmdline"] or []))), None)
-            if player_process:
-                break
-            time.sleep(0.25)
-        player_ready.set()
-        while True:
-            try:
-                command, value, response = player_commands.get(timeout=1)
-            except queue.Empty:
-                command = "status"
-                value = None
-                response = None
-            try:
-                if command == "shutdown":
-                    if player_context:
-                        player_context.close()
-                    if response:
-                        response.put((True, {"ok": True}))
-                    break
-                elif command == "reset":
-                    # Kill the managed browser process tree first so a stuck media
-                    # renderer cannot keep the old player session alive.
-                    if player_process:
-                        try:
-                            descendants = player_process.children(recursive=True)
-                            for process in reversed(descendants):
-                                try:
-                                    process.kill()
-                                except psutil.Error:
-                                    pass
-                            player_process.kill()
-                        except psutil.Error:
-                            pass
-                    try:
-                        if player_context:
-                            player_context.close()
-                    except Exception:
-                        pass
-                    try:
-                        player_playwright.stop()
-                    except Exception:
-                        pass
-                    player_playwright = sync_playwright().start()
-                    player_context = player_playwright.chromium.launch_persistent_context(
-                        user_data_dir=chrome_profile_path(),
-                        headless=False,
-                        args=["--autoplay-policy=no-user-gesture-required", "--no-first-run"],
-                    )
-                    player_page = player_context.pages[0] if player_context.pages else player_context.new_page()
-                    player_process = None
-                    profile = os.path.normcase(chrome_profile_path())
-                    for _ in range(40):
-                        player_process = next((process for process in psutil.process_iter(["name", "cmdline"])
-                                               if process.info["name"] and process.info["name"].lower() in {"chrome.exe", "chromium.exe"}
-                                               and profile in os.path.normcase(" ".join(process.info["cmdline"] or []))), None)
-                        if player_process:
-                            break
-                        time.sleep(0.25)
-                    player_snapshot = {"state": "idle", "video_id": None, "title": "No video selected"}
-                    result = dict(player_snapshot)
-                elif command == "play":
-                    for extra_page in player_context.pages:
-                        if extra_page != player_page and ("youtube.com" in extra_page.url.lower() or "youtu.be" in extra_page.url.lower()):
-                            extra_page.close()
-                    player_page.goto(f"https://www.youtube.com/watch?v={value}", wait_until="domcontentloaded", timeout=45000)
-                    player_page.wait_for_selector("video", timeout=30000)
-                    player_page.locator("video").evaluate("video => video.play()")
-                    player_snapshot = {"state": "playing", "video_id": value, "title": player_page.title()}
-                    result = dict(player_snapshot)
-                elif command == "pause":
-                    player_page.locator("video").evaluate("video => video.pause()", timeout=5000)
-                    player_snapshot = {**player_snapshot, "state": "paused"}
-                    result = {"ok": True}
-                elif command == "resume":
-                    player_page.locator("video").evaluate("video => video.play()", timeout=5000)
-                    player_snapshot = {**player_snapshot, "state": "playing"}
-                    result = {"ok": True}
-                else:
-                    if player_page:
-                        try:
-                            state = player_page.locator("video").evaluate("video => video.paused ? 'paused' : 'playing'", timeout=1500)
-                            match = re.search(r"[?&]v=([A-Za-z0-9_-]{11})", player_page.url)
-                            player_snapshot = {"state": state, "video_id": match.group(1) if match else None, "title": player_page.title()}
-                        except Exception:
-                            pass
-                    result = dict(player_snapshot)
-                if response:
-                    response.put((True, result))
-            except Exception as exc:
-                if response:
-                    response.put((False, exc))
-    except Exception as exc:
-        player_start_error = f"Could not start Google Chrome on the server: {exc}"
-        player_ready.set()
-        if player_playwright:
-            try:
-                player_playwright.stop()
-            except Exception:
-                pass
-            player_playwright = None
-
-
-def shutdown_player():
-    if player_thread and player_thread.is_alive() and player_ready.is_set() and not player_start_error:
-        response = queue.Queue(maxsize=1)
-        player_commands.put(("shutdown", None, response))
-        try:
-            response.get(timeout=5)
-            player_thread.join(timeout=5)
-        except queue.Empty:
-            pass
-    if player_playwright:
-        try:
-            player_playwright.stop()
-        except Exception:
-            pass
+        for process in psutil.process_iter(["name", "cmdline"]):
+            if (process.info["name"] and process.info["name"].lower() == "chrome.exe"
+                    and not any(argument.startswith("--type=") for argument in (process.info["cmdline"] or []))):
+                return psutil.Process(process.pid)
+    except Exception:
+        pass
+    return None
 
 
 def player_command(command, value=None, timeout=60):
-    global player_thread, player_start_error
     if sys.platform != "win32":
-        raise RuntimeError("Server-side YouTube playback requires Chrome on the Windows server.")
+        raise RuntimeError("The signed-in Chrome player is available on the Windows server.")
+    if not extension_connected.is_set():
+        raise RuntimeError("Open Chrome on the server and load the Soundroom extension from the extension folder. Keep Chrome running while using Soundroom.")
+    command_id = secrets.token_hex(12)
+    response = queue.Queue(maxsize=1)
     with player_lock:
-        if not player_thread or not player_thread.is_alive():
-            player_ready.clear()
-            player_start_error = None
-            player_thread = threading.Thread(target=player_worker, name="Soundroom Chrome controller", daemon=True)
-            player_thread.start()
-        if not player_ready.wait(timeout=30):
-            raise RuntimeError("Chrome did not start in time. Check that Google Chrome is installed on the server.")
-        if player_start_error:
-            raise RuntimeError(player_start_error)
-        response = queue.Queue(maxsize=1)
-        player_commands.put((command, value, response))
-    try:
-        succeeded, result = response.get(timeout=timeout)
-    except queue.Empty as exc:
-        raise RuntimeError("Chrome did not respond in time. Check the server display and internet connection.") from exc
-    if not succeeded:
-        if command == "play":
-            raise RuntimeError("Chrome opened YouTube, but playback did not start. Check the server's internet connection or any YouTube sign-in prompt.") from result
-        if command == "pause":
-            return False
-        raise result
-    return result
+        with extension_pending_lock:
+            extension_pending[command_id] = response
+        extension_outbound.put({"type": "command", "id": command_id, "command": command, "value": value})
+        try:
+            result = response.get(timeout=timeout)
+        except queue.Empty as exc:
+            with extension_pending_lock:
+                extension_pending.pop(command_id, None)
+            raise RuntimeError("Chrome did not respond to Soundroom. Check that the Soundroom extension is enabled and Chrome is open on the server.") from exc
+    if not result.get("ok"):
+        raise RuntimeError(result.get("error") or "Chrome could not complete the Soundroom request.")
+    player = result.get("result") or {}
+    if isinstance(player, dict) and "state" in player:
+        player_snapshot.update(player)
+        player_snapshot["available"] = True
+    return player
 
 
 def play_server_video(video_id):
     if not VIDEO_ID_RE.fullmatch(video_id):
         raise ValueError("Enter a valid YouTube video link.")
-    closed_tabs = close_normal_chrome_youtube_tabs()
-    result = player_command("play", video_id, timeout=60)
-    result["closed_tabs"] = closed_tabs
-    return result
+    return player_command("play", video_id, timeout=90)
 
 
 def pause_server_video():
-    if not player_thread or not player_thread.is_alive() or not player_snapshot.get("video_id"):
+    if not player_snapshot.get("video_id"):
         return False
-    return bool(player_command("pause", timeout=8))
+    player_command("pause", timeout=10)
+    return True
 
 
 def server_player_status():
-    if not player_thread or not player_thread.is_alive():
-        return {"state": "idle", "video_id": None, "title": "No video selected"}
-    try:
-        return player_command("status", timeout=3)
-    except Exception:
-        return dict(player_snapshot)
+    if not extension_connected.is_set():
+        return {"state": "idle", "video_id": None, "title": "Chrome extension offline", "available": False}
+    return {**player_snapshot, "available": True}
 
 
 def windows_audio_sessions():
-    """Find audio sessions that belong to Soundroom's managed Chrome process tree."""
+    """Find audio sessions belonging to the server's regular Chrome process tree."""
     from pycaw.pycaw import AudioUtilities
     managed_pids = set()
     if player_process:
@@ -619,6 +471,10 @@ def reload_schedules():
 
 @app.before_request
 def require_pin():
+    if request.endpoint == "chrome_extension_bridge":
+        if request.remote_addr not in {"127.0.0.1", "::1"} or not request.headers.get("Origin", "").startswith("chrome-extension://"):
+            return jsonify({"error": "The Soundroom Chrome extension must connect locally."}), 403
+        return None
     if request.endpoint == "scheduled_wake_bell":
         wake_key = request.headers.get("X-Soundroom-Wake-Key", "")
         return None if secrets.compare_digest(wake_key, config["secret"]) else (jsonify({"error": "Invalid wake-task key."}), 403)
@@ -627,6 +483,81 @@ def require_pin():
     if request.path.startswith("/api/"):
         return jsonify({"error": "Enter the local access PIN to continue."}), 401
     return redirect(url_for("login"))
+
+
+@sock.route("/internal/chrome-extension")
+def chrome_extension_bridge(ws):
+    global player_process, extension_connection_id, extension_ws
+    connection_id = secrets.token_hex(12)
+    with extension_lock:
+        previous_ws = extension_ws
+        extension_ws = ws
+        extension_connection_id = connection_id
+        extension_connected.set()
+        player_snapshot["available"] = True
+        player_process = find_chrome_main_process()
+    if previous_ws and previous_ws is not ws:
+        try:
+            previous_ws.close()
+        except Exception:
+            pass
+    try:
+        ws.send(json.dumps({"type": "connected"}))
+        while True:
+            try:
+                raw = ws.receive(timeout=0.25)
+            except TimeoutError:
+                raw = ""
+            except Exception:
+                break
+            if raw is None:
+                if not ws.connected:
+                    break
+                raw = ""
+            if raw:
+                try:
+                    message = json.loads(raw)
+                except (TypeError, json.JSONDecodeError):
+                    message = {}
+                if message.get("type") == "status" and isinstance(message.get("player"), dict):
+                    player_snapshot.update(message["player"])
+                    player_snapshot["available"] = True
+                elif message.get("type") == "result":
+                    with extension_pending_lock:
+                        response = extension_pending.pop(str(message.get("id", "")), None)
+                    if response:
+                        response.put({"ok": bool(message.get("ok")), "result": message.get("result"), "error": message.get("error")})
+            try:
+                outgoing = extension_outbound.get_nowait()
+                ws.send(json.dumps(outgoing))
+            except queue.Empty:
+                pass
+            except Exception:
+                break
+    finally:
+        is_current = False
+        with extension_lock:
+            if extension_connection_id == connection_id:
+                extension_connected.clear()
+                extension_connection_id = None
+                extension_ws = None
+                player_snapshot["available"] = False
+                player_process = None
+                is_current = True
+        if is_current:
+            with extension_pending_lock:
+                pending = list(extension_pending.values())
+                extension_pending.clear()
+            for response in pending:
+                try:
+                    response.put_nowait({"ok": False, "error": "Chrome disconnected from Soundroom."})
+                except queue.Full:
+                    pass
+            while True:
+                try:
+                    extension_outbound.get_nowait()
+                except queue.Empty:
+                    break
 
 
 @app.get("/login")
@@ -723,6 +654,14 @@ def player_reset():
         return jsonify(player_command("reset", timeout=45))
     except Exception as exc:
         return jsonify({"error": f"Could not reset the server player: {exc}"}), 503
+
+
+@app.post("/api/player/open-chrome")
+def player_open_chrome():
+    try:
+        return jsonify(open_chrome_on_server())
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 503
 
 
 @app.post("/api/bluetooth/settings")
@@ -954,7 +893,6 @@ def preview_tune():
 
 
 if __name__ == "__main__":
-    atexit.register(shutdown_player)
     if sys.stdout is None:
         startup_log = (DATA / "server.log").open("a", encoding="utf-8", buffering=1)
         sys.stdout = startup_log

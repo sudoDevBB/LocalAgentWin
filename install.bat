@@ -23,8 +23,6 @@ call .venv\Scripts\python.exe -m pip install --upgrade pip
 if errorlevel 1 goto failed
 call .venv\Scripts\python.exe -m pip install -r requirements.txt
 if errorlevel 1 goto failed
-call .venv\Scripts\python.exe -m playwright install chromium
-if errorlevel 1 goto failed
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0register_startup.ps1"
 if errorlevel 1 goto startupfailed

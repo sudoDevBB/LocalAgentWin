@@ -5,19 +5,20 @@ Soundroom is a Windows 10 local server for YouTube playback on the server PC, Wi
 ## Windows setup
 
 1. Install Python 3.11 or newer from [python.org](https://www.python.org/downloads/windows/) and enable the Python launcher.
-2. Double-click `install.bat`. It creates a virtual environment, installs Python dependencies and its managed Chromium browser, and registers Soundroom to start when your Windows account signs in. Setup needs internet access.
-3. Double-click `start.bat` to start it now. The server address and access PIN appear in the console. After future sign-ins it starts in the background; logs are written to `data/server.log`.
-4. On the Windows PC, open the printed address. Other devices on the same Wi-Fi can open the same address.
+2. Install Google Chrome and open it using the Windows account that will run Soundroom.
+3. Double-click `install.bat`. It creates a virtual environment, installs the server dependencies, and registers Soundroom to start when you sign in to Windows.
+4. In server Chrome, open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the project's `extension` folder. Allow its YouTube access; it needs this to close old YouTube tabs and control the new video. Leave it enabled.
+5. Sign in to YouTube in this regular Chrome profile. Then open Soundroom on the Windows PC at the printed address; other devices on the same Wi-Fi can use that address too. Keep Chrome open while using playback.
 
 The initial PIN is **223344**. Change it in **Server setup**. On a client device, select **Remember this device for 30 days** to avoid entering it on every visit. Changing the PIN invalidates remembered sign-ins.
 
 ## YouTube and server audio
 
-Paste a YouTube link and choose **Play on server**. Soundroom closes YouTube tabs in regular Chrome on the Windows PC, then opens the video in its managed browser window on that PC. The client browser sends the control request; video and sound come from the server. The managed window has a separate profile, so sign in there if a video requires it. YouTube needs internet access on the Windows PC.
+Paste a YouTube link and choose **Play on server**. Soundroom closes existing YouTube tabs, then opens the selected video in a new tab in the server's regular, signed-in Chrome profile. The client browser only sends the control request; video and sound come from Chrome on the Windows server. The server's Chrome extension must be enabled and connected.
 
-Set the Bluetooth speaker as the Windows default output. Use **Open Bluetooth settings** in Soundroom to open Settings on the server. Pairing and connection happen in Windows; the browser button cannot pair Bluetooth devices itself. If you clicked from another device, operate the Settings window at the server PC or connect to it with Windows Remote Desktop. Then select the Bluetooth speaker in Windows Sound settings. Soundroom reduces the managed browser audio while a room bell plays, then restores it.
+Set the Bluetooth speaker as the Windows default output. Use **Open Bluetooth settings** in Soundroom to open Settings on the server. Pairing and connection happen in Windows; the browser button cannot pair Bluetooth devices itself. If you clicked from another device, operate the Settings window at the server PC or connect to it with Windows Remote Desktop. Then select the Bluetooth speaker in Windows Sound settings. Soundroom reduces the server Chrome audio while a room bell plays, then restores it.
 
-If the video gets stuck paused or will not resume, choose **Reset server player**. This closes and relaunches Soundroom's managed browser session; then submit the YouTube link again.
+If the video gets stuck paused or will not resume, choose **Reset server player**. This closes Soundroom's YouTube tab in Chrome; then submit the YouTube link again.
 
 ## Room bells
 

@@ -2,7 +2,7 @@
 
 const $ = (selector) => document.querySelector(selector);
 const notice = $("#notice");
-let appState = { rooms: [], bells: [], tunes: [], volume: null, active_bell: null, player: { state: "idle" } };
+let appState = { rooms: [], bells: [], tunes: [], volume: null, active_bell: null, player: { state: "idle", available: false } };
 let roomFilter = "all";
 let volumeTimer;
 let noticeTimer;
@@ -266,11 +266,13 @@ function renderStatus() {
   $("#server-url-label").textContent = appState.server_url || "Server address unavailable";
   const player = appState.player || { state: "idle" };
   const labels = { playing: "Playing on server", paused: "Paused on server", idle: "Ready" };
-  $("#playback-state").textContent = labels[player.state] || "Ready";
-  $("#video-title").textContent = player.video_id ? player.title || `YouTube video ${player.video_id}` : "No video selected";
-  $("#server-player-note").textContent = player.state === "playing" ? "Sound is coming from the Windows server." : player.state === "paused" ? "Video is paused on the Windows server." : "Ready to play through the Windows default output.";
+  $("#playback-state").textContent = player.available ? (labels[player.state] || "Ready") : "Chrome extension offline";
+  $("#video-title").textContent = player.video_id ? player.title || `YouTube video ${player.video_id}` : player.available ? "No video selected" : "Waiting for signed-in Chrome";
+  $("#server-player-note").textContent = !player.available ? "Open regular Chrome on the Windows server with the Soundroom extension enabled." : player.state === "playing" ? "Sound is coming from the Windows server's signed-in Chrome session." : player.state === "paused" ? "Video is paused in the server's Chrome session." : "Ready to play through the Windows default output.";
   $("#pause-video").textContent = player.state === "paused" ? "Resume video" : "Pause video";
   $("#pause-video").disabled = !player.video_id;
+  $("#open-chrome").disabled = Boolean(player.available);
+  $("#reset-player").disabled = !player.available;
 }
 
 async function refresh() {
@@ -315,7 +317,7 @@ $("#youtube-form").addEventListener("submit", async (event) => {
   try {
     const result = await api("/api/player/play", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ video_id: videoId }) });
     await refresh();
-    showNotice(result.closed_tabs ? `Closed ${result.closed_tabs} YouTube tab${result.closed_tabs === 1 ? "" : "s"} in regular Chrome. Playing on the server.` : "Playing on the server.");
+    showNotice(result.closed_tabs ? `Closed ${result.closed_tabs} YouTube tab${result.closed_tabs === 1 ? "" : "s"} in your signed-in Chrome session.` : "Playing on the server.");
   } catch (error) { showNotice(error.message, "error"); }
   finally { button.disabled = false; button.textContent = "Play on server"; }
 });
@@ -325,6 +327,13 @@ $("#pause-video").addEventListener("click", async () => {
     const action = appState.player?.state === "paused" ? "resume" : "pause";
     await api(`/api/player/${action}`, { method: "POST" });
     await refresh();
+  } catch (error) { showNotice(error.message, "error"); }
+});
+
+$("#open-chrome").addEventListener("click", async () => {
+  try {
+    await api("/api/player/open-chrome", { method: "POST" });
+    showNotice("Chrome opened on the server. Make sure the Soundroom extension is enabled and YouTube is signed in there.");
   } catch (error) { showNotice(error.message, "error"); }
 });
 

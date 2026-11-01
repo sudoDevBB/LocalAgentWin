@@ -28,9 +28,9 @@ The server runs on Windows 10, which is connected to Bluetooth audio. A browser 
 
 ## Capabilities and Constraints
 
-- Play and change YouTube videos in a visible, Soundroom-controlled Chromium window on the Windows server; client browsers only send control requests.
-- Reset the managed server-side browser session from the client interface if playback becomes stuck.
-- Close YouTube tabs in the server's regular Chrome windows when a new video is requested; use a separate persistent Chromium profile for the controlled video session.
+- Play and change YouTube videos in the server's existing, signed-in Chrome profile through a Soundroom extension; client browsers only send control requests.
+- Reset the Soundroom-controlled YouTube tab from the client interface if playback becomes stuck.
+- Close existing YouTube tabs in server Chrome before opening the requested video in a new tab in the same signed-in profile.
 - Provide system volume control and gradually reduce music volume while a room bell plays, then restore the music volume.
 - Provide immediate 5-second and 10-second room bell controls, with a stop action while a bell is playing, alongside scheduled one-shot bells.
 - Allow room names and assigned sounds to be edited, and allow rooms to be removed with their scheduled bells cancelled.
@@ -44,8 +44,8 @@ The server runs on Windows 10, which is connected to Bluetooth audio. A browser 
 - Create scheduled bells for named rooms. Each room has one unique tune; bells use the assigned room tune, and the same tune cannot be assigned to another room. Built-in sounds are generated locally; custom tunes use 16-bit PCM WAV.
 - Preview each room's bell through the Windows audio output and upload additional 16-bit PCM WAV tunes.
 - Include a room-bell management portal and instructions for controlling the local server.
-- Use YouTube's normal watch page in Soundroom-managed Chromium. Existing YouTube tabs in regular Chrome are closed when a new video is requested.
-- The Windows setup script creates a virtual environment, installs Python dependencies and Chromium, and registers a sign-in startup task. Python 3.11 or later must already be installed.
+- Use YouTube's normal watch page in the server's regular signed-in Chrome profile through a locally installed Chrome extension. Google sign-in stays in the user's normal browser session.
+- The Windows setup script creates a virtual environment, installs Python dependencies, and registers a sign-in startup task. Python 3.11 or later and Google Chrome must be installed; the Soundroom extension is loaded once from the repository's `extension` folder.
 - Scheduled wake behavior depends on Windows wake timers and device support. A sleeping PC cannot receive an immediate network bell request, and a desktop application alert cannot appear above the Windows lock screen.
 - Bluetooth pairing and device selection remain Windows actions launched from the Soundroom interface; the user chooses the Bluetooth output in Windows settings.
 - Initial scheduling is one-shot and uses the Windows computer local time; recurrence and daylight-saving behavior remain future decisions.

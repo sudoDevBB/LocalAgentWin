@@ -43,10 +43,10 @@
       </section>
 
       <section class="panel player-panel server-player-panel" id="music" aria-labelledby="player-title">
-        <div class="section-head"><div><h2 id="player-title">Music on the server</h2><p>The video and sound play in Chromium on the Windows computer.</p></div><span id="playback-state" class="status-label">Ready</span></div>
+        <div class="section-head"><div><h2 id="player-title">Music on the server</h2><p>YouTube plays in the signed-in Chrome profile on the Windows computer.</p></div><span id="playback-state" class="status-label">Chrome extension offline</span></div>
         <div class="server-screen" aria-live="polite">
           <svg viewBox="0 0 48 40" role="img" aria-label="Windows server display"><rect x="3" y="3" width="42" height="28" rx="2"/><path d="M18 37h12M24 31v6"/></svg>
-          <div><strong id="video-title">No video selected</strong><span id="server-player-note">Ready to play through the Windows default output.</span></div>
+          <div><strong id="video-title">Waiting for signed-in Chrome</strong><span id="server-player-note">Open Chrome on the server with the Soundroom extension enabled.</span></div>
         </div>
         <form id="youtube-form" class="link-form">
           <label class="sr-only" for="youtube-url">YouTube video link</label>
@@ -55,6 +55,7 @@
         </form>
         <div class="player-controls">
           <button id="pause-video" type="button" class="secondary-button" disabled>Pause video</button>
+          <button id="open-chrome" type="button" class="secondary-button">Open Chrome on server</button>
           <button id="reset-player" type="button" class="quiet-button">Reset server player</button>
           <span id="server-url-label" class="video-title">Server address loading…</span>
         </div>
@@ -67,7 +68,7 @@
           <p><strong>Bluetooth speaker:</strong> this opens Settings on the Windows server. Pair or connect there, then select the speaker as Windows output. From another device, use the server PC or Remote Desktop to operate Settings.</p>
           <button id="bluetooth-settings" type="button" class="secondary-button">Open Bluetooth settings</button>
         </div>
-        <p class="help-text">Before playback, Soundroom closes YouTube tabs in regular Chrome on the server. The selected video then plays in the separate Soundroom browser on the server.</p>
+        <p class="help-text">Before playback, Soundroom closes YouTube tabs in regular Chrome, then plays the selected video in a new tab using that signed-in profile. Load the Soundroom extension from the project’s <code>extension</code> folder on the server.</p>
       </section>
 
       <section class="panel schedule-panel" id="schedule" aria-labelledby="schedule-title">

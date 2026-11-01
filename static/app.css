@@ -217,9 +217,13 @@ p { margin-bottom: 0; }
 .ring-button.stop-button:hover:not(:disabled) { background: #a93625; }
 .room-sound-settings { min-width: 0; color: var(--ink-soft); font-size: 13px; }
 .room-sound-settings summary { width: fit-content; color: var(--green); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.room-name-label { display: grid; gap: 4px; margin-top: 8px; color: var(--ink-soft); font-size: 13px; }
+.room-name-input { width: 100%; min-height: 36px; padding: 6px 9px; }
 .room-sound-settings select { width: 100%; margin-top: 8px; font-size: 13px; }
-.room-sound-actions { display: flex; gap: 7px; margin-top: 7px; }
+.room-sound-actions { display: flex; gap: 7px; margin-top: 7px; flex-wrap: wrap; }
 .room-sound-actions button { min-height: 34px; padding: 5px 9px; font-size: 13px; }
+.room-sound-actions .danger-button { color: #8a2e23; }
+.room-sound-actions .danger-button:hover:not(:disabled) { color: #fffaf2; background: var(--vermilion); border-color: var(--vermilion); }
 
 .player-panel { display: flex; flex-direction: column; }
 .player-panel .section-head { align-items: start; }

@@ -33,6 +33,9 @@ The server runs on Windows 10, which is connected to Bluetooth audio. A browser 
 - Close YouTube tabs in the server's regular Chrome windows when a new video is requested; use a separate persistent Chromium profile for the controlled video session.
 - Provide system volume control and gradually reduce music volume while a room bell plays, then restore the music volume.
 - Provide immediate 5-second and 10-second room bell controls, with a stop action while a bell is playing, alongside scheduled one-shot bells.
+- Allow room names and assigned sounds to be edited, and allow rooms to be removed with their scheduled bells cancelled.
+- Show a centered, topmost Windows server-display alert for every bell trigger with the room name; wake the display and interrupt the screen saver.
+- Register wake-enabled Windows Task Scheduler entries for scheduled bells so compatible PCs can wake from sleep.
 - Provide a button that opens Bluetooth settings on the server so the user can pair/connect a speaker and select it as the Windows default output.
 - Explain that Bluetooth pairing is completed on the server PC or through Remote Desktop; the browser control only opens Windows Settings on the server.
 - Start the server at Windows sign-in through Task Scheduler.
@@ -43,6 +46,7 @@ The server runs on Windows 10, which is connected to Bluetooth audio. A browser 
 - Include a room-bell management portal and instructions for controlling the local server.
 - Use YouTube's normal watch page in Soundroom-managed Chromium. Existing YouTube tabs in regular Chrome are closed when a new video is requested.
 - The Windows setup script creates a virtual environment, installs Python dependencies and Chromium, and registers a sign-in startup task. Python 3.11 or later must already be installed.
+- Scheduled wake behavior depends on Windows wake timers and device support. A sleeping PC cannot receive an immediate network bell request, and a desktop application alert cannot appear above the Windows lock screen.
 - Bluetooth pairing and device selection remain Windows actions launched from the Soundroom interface; the user chooses the Bluetooth output in Windows settings.
 - Initial scheduling is one-shot and uses the Windows computer local time; recurrence and daylight-saving behavior remain future decisions.
 - LAN access uses a six-digit PIN. First-run default is `223344`; the owner can change it from Server setup.

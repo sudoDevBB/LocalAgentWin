@@ -6,8 +6,8 @@ Soundroom is a Windows 10 local server for YouTube playback on the server PC, Wi
 
 1. Install Python 3.11 or newer from [python.org](https://www.python.org/downloads/windows/) and enable the Python launcher.
 2. Double-click `install.bat`. It creates a virtual environment, installs Python dependencies and its managed Chromium browser, and registers Soundroom to start when your Windows account signs in. Setup needs internet access.
-4. Double-click `start.bat` to start it now. The server address and access PIN appear in the console. After future sign-ins it starts in the background; logs are written to `data/server.log`.
-5. On the Windows PC, open the printed address. Other devices on the same Wi-Fi can open the same address.
+3. Double-click `start.bat` to start it now. The server address and access PIN appear in the console. After future sign-ins it starts in the background; logs are written to `data/server.log`.
+4. On the Windows PC, open the printed address. Other devices on the same Wi-Fi can open the same address.
 
 The initial PIN is **223344**. Change it in **Server setup**. On a client device, select **Remember this device for 30 days** to avoid entering it on every visit. Changing the PIN invalidates remembered sign-ins.
 
@@ -21,7 +21,9 @@ If the video gets stuck paused or will not resume, choose **Reset server player*
 
 ## Room bells
 
-Each room has a **Ring · 5 sec** and **Ring · 10 sec** control. The selected control becomes **Stop bell** while the bell is playing. Only one room bell plays at a time. Scheduled one-shot bells remain available in the schedule below the console. Room sounds are six distinct built-in WAV patterns; custom sounds must be uncompressed 16-bit PCM WAV files.
+Each room has a **Ring · 5 sec** and **Ring · 10 sec** control. The selected control becomes **Stop bell** while the bell is playing. Room names and sounds are editable under **Sound settings**; removing a room also cancels its scheduled bells. Scheduled one-shot bells remain available in the schedule below the console. Room sounds are six distinct built-in WAV patterns; custom sounds must be uncompressed 16-bit PCM WAV files.
+
+Every triggered bell opens a centered, topmost server-display alert that reads **“Please attend to Room &lt;room name&gt;”**. It wakes the display and interrupts the screen saver, then stays until acknowledged or for 60 seconds. Scheduled bells register Windows wake tasks; for those to wake the PC from sleep, the device must support wake timers and **Allow wake timers** must be enabled under Windows advanced power settings (Sleep → Allow wake timers). Windows may wake the PC while leaving its display off, depending on the device. A manual bell request cannot reach a PC while it is asleep; wake the PC first. The alert cannot appear over the Windows lock screen, so keep the server user signed in.
 
 ## Keep the server address stable
 

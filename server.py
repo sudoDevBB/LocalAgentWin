@@ -189,6 +189,36 @@ def init_db():
             db.execute("UPDATE rooms SET default_tune=? WHERE id=?", (tune, row["id"]))
 
 
+def manage_wake_task(mode, bell_id, fire_at=None):
+    if sys.platform != "win32":
+        return None
+    command = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+               str(ROOT / "manage_bell_task.ps1"), "-Mode", mode, "-BellId", str(bell_id)]
+    if fire_at:
+        command.extend(["-FireAt", fire_at])
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
+        return True
+    except Exception as exc:
+        details = getattr(exc, "stderr", "")
+        print(f"Could not {mode.lower()} Windows wake task for bell {bell_id}: {exc} {details}".strip())
+        return False
+
+
+def show_server_alert(room_name):
+    if sys.platform != "win32":
+        return
+    try:
+        subprocess.Popen(
+            [sys.executable, str(ROOT / "alert_window.py"), room_name],
+            cwd=str(ROOT),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            close_fds=True,
+        )
+    except OSError as exc:
+        print(f"Could not show the server room alert: {exc}")
+
+
 def pycaw_endpoint():
     from pycaw.pycaw import AudioUtilities
     return AudioUtilities.GetSpeakers().EndpointVolume
@@ -541,6 +571,7 @@ def start_bell(room_id, room_name, tune, duration, label="", bell_id=None):
             "duration": duration,
             "started_at": datetime.now().isoformat(timespec="seconds"),
         }
+    show_server_alert(room_name)
     threading.Thread(target=duck_and_play, args=(tune, duration, stop_event), daemon=True).start()
     return True
 
@@ -556,6 +587,7 @@ def fire_bell(bell_id):
     if not row:
         return
     start_bell(row["room_id"], row["room_name"], row["tune"], row["duration"], row["label"], row["id"])
+    manage_wake_task("Remove", bell_id)
 
 
 def schedule_bell(row):
@@ -565,23 +597,31 @@ def schedule_bell(row):
     except Exception:
         pass
     if not row["enabled"]:
-        return
+        manage_wake_task("Remove", row["id"])
+        return None
     fire_at = datetime.fromisoformat(row["fire_at"])
     if fire_at <= datetime.now():
-        return
+        return None
     scheduler.add_job(fire_bell, "date", run_date=fire_at, args=[row["id"]], id=job_id, replace_existing=True)
+    return manage_wake_task("Register", row["id"], fire_at.isoformat(timespec="seconds"))
 
 
 def reload_schedules():
     now = datetime.now()
     with connect() as db:
+        expired_ids = [row[0] for row in db.execute("SELECT id FROM bells WHERE enabled=1 AND fire_at<=?", (now.isoformat(timespec="seconds"),))]
         db.execute("UPDATE bells SET enabled=0 WHERE enabled=1 AND fire_at<=?", (now.isoformat(timespec="seconds"),))
         for row in db.execute("SELECT * FROM bells WHERE enabled=1"):
             schedule_bell(row)
+    for bell_id in expired_ids:
+        manage_wake_task("Remove", bell_id)
 
 
 @app.before_request
 def require_pin():
+    if request.endpoint == "scheduled_wake_bell":
+        wake_key = request.headers.get("X-Soundroom-Wake-Key", "")
+        return None if secrets.compare_digest(wake_key, config["secret"]) else (jsonify({"error": "Invalid wake-task key."}), 403)
     if request.endpoint in {"login", "login_post", "static"} or session.get("authenticated"):
         return None
     if request.path.startswith("/api/"):
@@ -741,6 +781,12 @@ def stop_bell():
     return jsonify({"ok": True})
 
 
+@app.post("/internal/wake-bell/<int:bell_id>")
+def scheduled_wake_bell(bell_id):
+    fire_bell(bell_id)
+    return jsonify({"ok": True})
+
+
 @app.put("/api/volume")
 def volume():
     try:
@@ -756,6 +802,9 @@ def add_room():
     if not name:
         return jsonify({"error": "Enter a room name."}), 400
     with connect() as db:
+        conflict = db.execute("SELECT id FROM rooms WHERE lower(name)=lower(?)", (name,)).fetchone()
+        if conflict:
+            return jsonify({"error": "That room already exists."}), 409
         assigned = {row[0] for row in db.execute("SELECT default_tune FROM rooms")}
     available = [tune for tune in sorted(p.name for p in TUNES.glob("*.wav")) if tune not in assigned]
     if not available:
@@ -770,17 +819,60 @@ def add_room():
 
 @app.put("/api/rooms/<int:room_id>")
 def update_room(room_id):
-    tune = secure_filename(str((request.json or {}).get("default_tune", "")))
-    if not tune or Path(tune).suffix.lower() != ".wav" or not (TUNES / tune).is_file():
-        return jsonify({"error": "Choose one of the available WAV tunes."}), 400
-    with connect() as db:
-        conflict = db.execute("SELECT name FROM rooms WHERE default_tune=? AND id<>?", (tune, room_id)).fetchone()
+    data = request.json or {}
+    name = str(data.get("name", "")).strip()[:48] if "name" in data else None
+    tune = secure_filename(str(data.get("default_tune", ""))) if "default_tune" in data else None
+    if name is not None and not name:
+        return jsonify({"error": "Enter a room name."}), 400
+    if name is not None:
+        with connect() as db:
+            conflict = db.execute("SELECT id FROM rooms WHERE lower(name)=lower(?) AND id<>?", (name, room_id)).fetchone()
         if conflict:
-            return jsonify({"error": f"That sound is already assigned to {conflict['name']}. Choose a different tune so each room remains recognizable."}), 409
-        cursor = db.execute("UPDATE rooms SET default_tune=? WHERE id=?", (tune, room_id))
+            return jsonify({"error": "That room name is already in use."}), 409
+    if tune is not None and (not tune or Path(tune).suffix.lower() != ".wav" or not (TUNES / tune).is_file()):
+        return jsonify({"error": "Choose one of the available WAV tunes."}), 400
+    updates = []
+    values = []
+    if name is not None:
+        updates.append("name=?")
+        values.append(name)
+    if tune is not None:
+        updates.append("default_tune=?")
+        values.append(tune)
+    if not updates:
+        return jsonify({"error": "Change the room name or sound."}), 400
+    with connect() as db:
+        if tune is not None:
+            conflict = db.execute("SELECT name FROM rooms WHERE default_tune=? AND id<>?", (tune, room_id)).fetchone()
+            if conflict:
+                return jsonify({"error": f"That sound is already assigned to {conflict['name']}. Choose a different tune so each room remains recognizable."}), 409
+        values.append(room_id)
+        cursor = db.execute(f"UPDATE rooms SET {', '.join(updates)} WHERE id=?", values)
     if not cursor.rowcount:
         return jsonify({"error": "Room not found."}), 404
-    return jsonify({"ok": True, "default_tune": tune})
+    return jsonify({"ok": True, "name": name, "default_tune": tune})
+
+
+@app.delete("/api/rooms/<int:room_id>")
+def delete_room(room_id):
+    global active_bell_stop
+    with connect() as db:
+        room = db.execute("SELECT id, name FROM rooms WHERE id=?", (room_id,)).fetchone()
+        if not room:
+            return jsonify({"error": "Room not found."}), 404
+        bell_ids = [row[0] for row in db.execute("SELECT id FROM bells WHERE room_id=?", (room_id,))]
+        db.execute("DELETE FROM bells WHERE room_id=?", (room_id,))
+        db.execute("DELETE FROM rooms WHERE id=?", (room_id,))
+    for bell_id in bell_ids:
+        try:
+            scheduler.remove_job(f"bell-{bell_id}")
+        except Exception:
+            pass
+        manage_wake_task("Remove", bell_id)
+    with bell_state_lock:
+        if active_bell and active_bell["room_id"] == room_id and active_bell_stop:
+            active_bell_stop.set()
+    return jsonify({"ok": True, "removed": room["name"], "cancelled_bells": len(bell_ids)})
 
 
 @app.post("/api/bells")
@@ -803,8 +895,8 @@ def add_bell():
             return jsonify({"error": "Assign a distinct bell sound to this room before scheduling a bell."}), 400
         cursor = db.execute("INSERT INTO bells(room_id,label,fire_at,tune,duration) VALUES(?,?,?,?,?)", (room_id, str(data.get("label", "")).strip()[:80], fire_at.isoformat(timespec="seconds"), tune, duration))
         row = db.execute("SELECT * FROM bells WHERE id=?", (cursor.lastrowid,)).fetchone()
-        schedule_bell(row)
-        return jsonify({"id": cursor.lastrowid}), 201
+        wake_enabled = schedule_bell(row)
+        return jsonify({"id": cursor.lastrowid, "wake_enabled": wake_enabled}), 201
 
 
 @app.delete("/api/bells/<int:bell_id>")

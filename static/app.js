@@ -182,6 +182,32 @@ function renderRooms() {
     tuneSelect.addEventListener("change", () => roomTuneDrafts.set(room.id, tuneSelect.value));
     const detailActions = document.createElement("div");
     detailActions.className = "room-sound-actions";
+    const rename = document.createElement("button");
+    rename.type = "button";
+    rename.className = "secondary-button";
+    rename.textContent = "Save room name";
+    rename.addEventListener("click", async () => {
+      const input = settings.querySelector(".room-name-input");
+      try {
+        await api(`/api/rooms/${room.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: input.value }) });
+        await refresh();
+        showNotice(`Room renamed to ${input.value.trim()}.`);
+      } catch (error) { showNotice(error.message, "error"); }
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "text-button danger-button";
+    remove.textContent = "Remove room";
+    remove.addEventListener("click", async () => {
+      if (!window.confirm(`Remove ${room.name}? Its scheduled bells will also be cancelled.`)) return;
+      try {
+        await api(`/api/rooms/${room.id}`, { method: "DELETE" });
+        roomTuneDrafts.delete(room.id);
+        if (roomFilter === String(room.id)) roomFilter = "all";
+        await refresh();
+        showNotice(`${room.name} removed. Its scheduled bells were cancelled.`);
+      } catch (error) { showNotice(error.message, "error"); }
+    });
     const preview = document.createElement("button");
     preview.type = "button";
     preview.className = "quiet-button";
@@ -204,8 +230,18 @@ function renderRooms() {
         showNotice(`Room sound saved for ${room.name}.`);
       } catch (error) { showNotice(error.message, "error"); }
     });
-    detailActions.append(preview, save);
-    settings.append(summary, tuneSelect, detailActions);
+    detailActions.append(preview, save, rename, remove);
+    const nameLabel = document.createElement("label");
+    nameLabel.className = "room-name-label";
+    nameLabel.textContent = "Room name";
+    const nameInput = document.createElement("input");
+    nameInput.className = "room-name-input";
+    nameInput.type = "text";
+    nameInput.maxLength = 48;
+    nameInput.value = room.name;
+    nameInput.setAttribute("aria-label", `Room name for ${room.name}`);
+    nameLabel.append(nameInput);
+    settings.append(summary, nameLabel, tuneSelect, detailActions);
 
     row.append(identity, controls, settings);
     list.append(row);
@@ -341,11 +377,11 @@ $("#bell-form").addEventListener("submit", async (event) => {
     return;
   }
   try {
-    await api("/api/bells", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ room_id: $("#bell-room").value, fire_at: `${time}:00`, duration: $("#bell-duration").value, label: $("#bell-label").value }) });
+    const result = await api("/api/bells", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ room_id: $("#bell-room").value, fire_at: `${time}:00`, duration: $("#bell-duration").value, label: $("#bell-label").value }) });
     $("#bell-form").reset();
     $("#bell-form").hidden = true;
     await refresh();
-    showNotice("Room bell scheduled.");
+    showNotice(result.wake_enabled === false ? "Bell scheduled, but Windows could not register its wake task. It may not ring if the PC sleeps." : "Room bell scheduled.", result.wake_enabled === false ? "error" : "info");
   } catch (error) { showNotice(error.message, "error"); }
 });
 

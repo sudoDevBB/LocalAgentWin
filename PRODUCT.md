@@ -29,10 +29,12 @@ The server runs on Windows 10, which is connected to Bluetooth audio. A browser 
 ## Capabilities and Constraints
 
 - Play and change YouTube videos in a visible, Soundroom-controlled Chromium window on the Windows server; client browsers only send control requests.
+- Reset the managed server-side browser session from the client interface if playback becomes stuck.
 - Close YouTube tabs in the server's regular Chrome windows when a new video is requested; use a separate persistent Chromium profile for the controlled video session.
 - Provide system volume control and gradually reduce music volume while a room bell plays, then restore the music volume.
 - Provide immediate 5-second and 10-second room bell controls, with a stop action while a bell is playing, alongside scheduled one-shot bells.
 - Provide a button that opens Bluetooth settings on the server so the user can pair/connect a speaker and select it as the Windows default output.
+- Explain that Bluetooth pairing is completed on the server PC or through Remote Desktop; the browser control only opens Windows Settings on the server.
 - Start the server at Windows sign-in through Task Scheduler.
 - Use an initial access PIN of `223344`, allow changing it from server settings, and offer a 30-day remembered browser session.
 - Display the current Windows LAN address and document DHCP reservation on the user's Airtel router to keep the address stable.

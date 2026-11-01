@@ -307,6 +307,47 @@ def player_worker():
                     if response:
                         response.put((True, {"ok": True}))
                     break
+                elif command == "reset":
+                    # Kill the managed browser process tree first so a stuck media
+                    # renderer cannot keep the old player session alive.
+                    if player_process:
+                        try:
+                            descendants = player_process.children(recursive=True)
+                            for process in reversed(descendants):
+                                try:
+                                    process.kill()
+                                except psutil.Error:
+                                    pass
+                            player_process.kill()
+                        except psutil.Error:
+                            pass
+                    try:
+                        if player_context:
+                            player_context.close()
+                    except Exception:
+                        pass
+                    try:
+                        player_playwright.stop()
+                    except Exception:
+                        pass
+                    player_playwright = sync_playwright().start()
+                    player_context = player_playwright.chromium.launch_persistent_context(
+                        user_data_dir=chrome_profile_path(),
+                        headless=False,
+                        args=["--autoplay-policy=no-user-gesture-required", "--no-first-run"],
+                    )
+                    player_page = player_context.pages[0] if player_context.pages else player_context.new_page()
+                    player_process = None
+                    profile = os.path.normcase(chrome_profile_path())
+                    for _ in range(40):
+                        player_process = next((process for process in psutil.process_iter(["name", "cmdline"])
+                                               if process.info["name"] and process.info["name"].lower() in {"chrome.exe", "chromium.exe"}
+                                               and profile in os.path.normcase(" ".join(process.info["cmdline"] or []))), None)
+                        if player_process:
+                            break
+                        time.sleep(0.25)
+                    player_snapshot = {"state": "idle", "video_id": None, "title": "No video selected"}
+                    result = dict(player_snapshot)
                 elif command == "play":
                     for extra_page in player_context.pages:
                         if extra_page != player_page and ("youtube.com" in extra_page.url.lower() or "youtu.be" in extra_page.url.lower()):
@@ -634,6 +675,14 @@ def player_resume():
     except Exception as exc:
         return jsonify({"error": f"Could not resume the server video: {exc}"}), 409
     return jsonify({"ok": True})
+
+
+@app.post("/api/player/reset")
+def player_reset():
+    try:
+        return jsonify(player_command("reset", timeout=45))
+    except Exception as exc:
+        return jsonify({"error": f"Could not reset the server player: {exc}"}), 503
 
 
 @app.post("/api/bluetooth/settings")

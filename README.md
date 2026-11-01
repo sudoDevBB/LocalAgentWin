@@ -15,7 +15,9 @@ The initial PIN is **223344**. Change it in **Server setup**. On a client device
 
 Paste a YouTube link and choose **Play on server**. Soundroom closes YouTube tabs in regular Chrome on the Windows PC, then opens the video in its managed browser window on that PC. The client browser sends the control request; video and sound come from the server. The managed window has a separate profile, so sign in there if a video requires it. YouTube needs internet access on the Windows PC.
 
-Set the Bluetooth speaker as the Windows default output. Use **Open Bluetooth settings** in Soundroom to connect or pair a speaker on the server. If Windows is using another output, select the Bluetooth speaker in Windows Sound settings after connecting it. Soundroom reduces the managed browser audio while a room bell plays, then restores it.
+Set the Bluetooth speaker as the Windows default output. Use **Open Bluetooth settings** in Soundroom to open Settings on the server. Pairing and connection happen in Windows; the browser button cannot pair Bluetooth devices itself. If you clicked from another device, operate the Settings window at the server PC or connect to it with Windows Remote Desktop. Then select the Bluetooth speaker in Windows Sound settings. Soundroom reduces the managed browser audio while a room bell plays, then restores it.
+
+If the video gets stuck paused or will not resume, choose **Reset server player**. This closes and relaunches Soundroom's managed browser session; then submit the YouTube link again.
 
 ## Room bells
 

@@ -55,6 +55,7 @@
         </form>
         <div class="player-controls">
           <button id="pause-video" type="button" class="secondary-button" disabled>Pause video</button>
+          <button id="reset-player" type="button" class="quiet-button">Reset server player</button>
           <span id="server-url-label" class="video-title">Server address loading…</span>
         </div>
         <div class="volume-control">
@@ -63,7 +64,7 @@
           <output id="volume-value" for="system-volume">—</output>
         </div>
         <div class="bluetooth-row">
-          <p><strong>Bluetooth speaker:</strong> connect it in Windows Bluetooth settings, then select it as the Windows output.</p>
+          <p><strong>Bluetooth speaker:</strong> this opens Settings on the Windows server. Pair or connect there, then select the speaker as Windows output. From another device, use the server PC or Remote Desktop to operate Settings.</p>
           <button id="bluetooth-settings" type="button" class="secondary-button">Open Bluetooth settings</button>
         </div>
         <p class="help-text">Before playback, Soundroom closes YouTube tabs in regular Chrome on the server. The selected video then plays in the separate Soundroom browser on the server.</p>

@@ -292,10 +292,22 @@ $("#pause-video").addEventListener("click", async () => {
   } catch (error) { showNotice(error.message, "error"); }
 });
 
+$("#reset-player").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = "Resetting player…";
+  try {
+    await api("/api/player/reset", { method: "POST" });
+    await refresh();
+    showNotice("Server player reset. Enter a YouTube link to start playback again.");
+  } catch (error) { showNotice(error.message, "error"); }
+  finally { button.disabled = false; button.textContent = "Reset server player"; }
+});
+
 $("#bluetooth-settings").addEventListener("click", async () => {
   try {
     await api("/api/bluetooth/settings", { method: "POST" });
-    showNotice("Windows Bluetooth settings opened on the server. Connect your speaker and set it as the Windows output.");
+    showNotice("Bluetooth Settings opened on the server. Operate it at the server PC or through Remote Desktop, then select the speaker as Windows output.");
   } catch (error) { showNotice(error.message, "error"); }
 });
 

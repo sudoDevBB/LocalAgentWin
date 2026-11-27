@@ -204,12 +204,12 @@ def manage_wake_task(mode, bell_id, fire_at=None):
         return False
 
 
-def show_server_alert(room_name):
+def show_server_alert(room_name, recipient=""):
     if sys.platform != "win32":
         return
     try:
         subprocess.Popen(
-            [sys.executable, str(ROOT / "alert_window.py"), room_name],
+            [sys.executable, str(ROOT / "alert_window.py"), room_name, recipient],
             cwd=str(ROOT),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             close_fds=True,
@@ -423,7 +423,7 @@ def start_bell(room_id, room_name, tune, duration, label="", bell_id=None):
             "duration": duration,
             "started_at": datetime.now().isoformat(timespec="seconds"),
         }
-    show_server_alert(room_name)
+    show_server_alert(room_name, label)
     threading.Thread(target=duck_and_play, args=(tune, duration, stop_event), daemon=True).start()
     return True
 
@@ -675,6 +675,22 @@ def bluetooth_settings():
     return jsonify({"ok": True})
 
 
+@app.post("/api/bluetooth/radio")
+def bluetooth_radio():
+    if sys.platform != "win32":
+        return jsonify({"error": "Bluetooth controls are available on the Windows server."}), 503
+    state = (request.json or {}).get("state")
+    if state not in ("On", "Off"):
+        return jsonify({"error": "Choose On or Off."}), 400
+    try:
+        result = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "bluetooth.ps1"), "-State", state], capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip() or "Windows could not change Bluetooth.")
+    except (OSError, subprocess.TimeoutExpired, RuntimeError) as exc:
+        return jsonify({"error": str(exc)}), 503
+    return jsonify({"ok": True})
+
+
 @app.put("/api/settings/pin")
 def update_pin():
     global config
@@ -702,11 +718,14 @@ def ring_room(room_id):
         return jsonify({"error": "Choose a 5 or 10 second bell."}), 400
     if duration not in {5, 10}:
         return jsonify({"error": "Choose a 5 or 10 second bell."}), 400
+    recipient = str((request.json or {}).get("recipient", ""))
+    if recipient not in {"Receptionist", "Housekeeping"}:
+        return jsonify({"error": "Choose Receptionist or Housekeeping."}), 400
     with connect() as db:
         room = db.execute("SELECT id, name, default_tune FROM rooms WHERE id=?", (room_id,)).fetchone()
     if not room or not room["default_tune"] or not (TUNES / room["default_tune"]).is_file():
         return jsonify({"error": "Assign a room sound before ringing this room."}), 400
-    if not start_bell(room["id"], room["name"], room["default_tune"], duration):
+    if not start_bell(room["id"], room["name"], room["default_tune"], duration, recipient):
         return jsonify({"error": f"{active_bell['room']} bell is already playing. Stop it before ringing another room."}), 409
     return jsonify({"ok": True, "room": room["name"], "duration": duration})
 
@@ -897,6 +916,9 @@ if __name__ == "__main__":
         startup_log = (DATA / "server.log").open("a", encoding="utf-8", buffering=1)
         sys.stdout = startup_log
         sys.stderr = startup_log
+    if sys.platform == "win32":
+        import ctypes
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000001)
     init_db()
     scheduler.start()
     reload_schedules()

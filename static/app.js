@@ -90,7 +90,7 @@ function renderBells() {
   }
 }
 
-async function ringRoom(room, duration) {
+async function ringRoom(room, duration, recipient) {
   if (appState.active_bell && appState.active_bell.room_id === room.id) {
     try {
       await api("/api/bells/stop", { method: "POST" });
@@ -98,7 +98,7 @@ async function ringRoom(room, duration) {
     } catch (error) { showNotice(error.message, "error"); }
   } else {
     try {
-      await api(`/api/rooms/${room.id}/ring`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ duration }) });
+      await api(`/api/rooms/${room.id}/ring`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ duration, recipient }) });
       showNotice(`${room.name} bell ringing for ${duration} seconds.`);
     } catch (error) { showNotice(error.message, "error"); }
   }
@@ -148,18 +148,18 @@ function renderRooms() {
 
     const controls = document.createElement("div");
     controls.className = "ring-controls";
-    for (const duration of [5, 10]) {
+    for (const recipient of ["Receptionist", "Housekeeping"]) for (const duration of [5, 10]) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "ring-button";
       const ringingHere = appState.active_bell?.room_id === room.id;
       const stopDuration = [5, 10].includes(appState.active_bell?.duration) ? appState.active_bell.duration : 5;
-      const isStop = ringingHere && duration === stopDuration;
-      button.textContent = isStop ? "Stop bell" : `Ring · ${duration} sec`;
+      const isStop = ringingHere && duration === stopDuration && appState.active_bell?.label === recipient;
+      button.textContent = isStop ? "Stop bell" : `${recipient} · ${duration} sec`;
       button.setAttribute("aria-label", isStop ? `Stop ${room.name} bell` : `Ring ${room.name} bell for ${duration} seconds`);
       button.disabled = Boolean(appState.active_bell) && !isStop;
       if (isStop) button.classList.add("stop-button");
-      button.addEventListener("click", () => ringRoom(room, duration));
+      button.addEventListener("click", () => ringRoom(room, duration, recipient));
       controls.append(button);
     }
 
@@ -253,7 +253,7 @@ function renderStatus() {
   renderBells();
   const live = $("#bell-live");
   if (appState.active_bell) {
-    live.textContent = `${appState.active_bell.room} bell is ringing. Press Stop bell to end it now.`;
+    live.textContent = `${appState.active_bell.room} is calling ${appState.active_bell.label || "for assistance"}. Press Stop bell to end it now.`;
     live.hidden = false;
   } else {
     live.hidden = true;
@@ -349,12 +349,14 @@ $("#reset-player").addEventListener("click", async (event) => {
   finally { button.disabled = false; button.textContent = "Reset server player"; }
 });
 
-$("#bluetooth-settings").addEventListener("click", async () => {
-  try {
-    await api("/api/bluetooth/settings", { method: "POST" });
-    showNotice("Bluetooth Settings opened on the server. Operate it at the server PC or through Remote Desktop, then select the speaker as Windows output.");
-  } catch (error) { showNotice(error.message, "error"); }
-});
+for (const state of ["On", "Off"]) {
+  $(`#bluetooth-${state.toLowerCase()}`).addEventListener("click", async () => {
+    try {
+      await api("/api/bluetooth/radio", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ state }) });
+      showNotice(`Bluetooth turned ${state.toLowerCase()} on the server.`);
+    } catch (error) { showNotice(error.message, "error"); }
+  });
+}
 
 $("#system-volume").addEventListener("input", (event) => {
   $("#volume-value").textContent = `${event.target.value}%`;

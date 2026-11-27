@@ -18,6 +18,7 @@ def wake_display():
 
 def main():
     room = sys.argv[1] if len(sys.argv) > 1 else "Unknown room"
+    recipient = sys.argv[2] if len(sys.argv) > 2 else ""
     wake_display()
 
     window = tk.Tk()
@@ -32,7 +33,7 @@ def main():
 
     tk.Label(window, text="SOUND ALERT", bg="#18232a", fg="#e5c45e",
              font=("Segoe UI", 13, "bold")).pack(pady=(38, 12))
-    tk.Label(window, text=f"Please attend to Room\n{room}", bg="#18232a", fg="#fffaf0",
+    tk.Label(window, text=f"{recipient or 'Please attend'}: Room\n{room}", bg="#18232a", fg="#fffaf0",
              font=("Segoe UI", 30, "bold"), justify="center", wraplength=680).pack(expand=True)
     tk.Button(window, text="Acknowledge", command=window.destroy, width=18, height=2,
               bg="#d8b548", fg="#18232a", activebackground="#e5c45e",
